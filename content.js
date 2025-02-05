@@ -363,75 +363,45 @@ async function handleParagraphAnnotation(paragraph) {
         // 标记段落为处理中
         processingParagraphs.add(paragraph);
 
-        // 先检查缓存中是否有需要翻译的新单词
-        const wordsToTranslate = new Set();
-        const annotations = [];
-        const words = text.match(/\b[a-zA-Z]+\b/g) || [];
-        
-        // 用于跟踪本段落中已处理的单词（小写形式）
-        const processedWords = new Set();
-        
-        // 检查每个单词
-        for (const word of words) {
-            const wordLower = word.toLowerCase();
-            
-            // 如果单词已经在全局处理过，跳过
-            if (globalProcessedWords.has(wordLower)) {
-                continue;
-            }
-            
-            // 如果单词已在本段落中处理过，跳过
-            if (processedWords.has(wordLower)) {
-                continue;
-            }
-            
-            if (translationCache.has(wordLower)) {
-                // 如果单词在缓存中，直接添加到注释列表
-                annotations.push({
-                    word: word,
-                    meaning: translationCache.get(wordLower)
-                });
-                processedWords.add(wordLower);
-            } else {
-                wordsToTranslate.add(word);
-            }
-        }
-
-        // 如果有新单词需要翻译，则调用API
-        if (wordsToTranslate.size > 0) {
-            await new Promise((resolve, reject) => {
-                chrome.runtime.sendMessage(
-                    { type: 'translate', text: text, mode: 'annotate' },
-                    response => {
-                        if (chrome.runtime.lastError) {
-                            reject(chrome.runtime.lastError);
-                            return;
-                        }
-
-                        if (response && response.annotations && Array.isArray(response.annotations)) {
-                            // 将新翻译的单词添加到缓存
-                            response.annotations.forEach(annotation => {
-                                if (annotation.word && annotation.meaning) {
-                                    const wordLower = annotation.word.toLowerCase();
-                                    if (!processedWords.has(wordLower)) {
-                                        translationCache.set(wordLower, annotation.meaning);
-                                        annotations.push(annotation);
-                                        processedWords.add(wordLower);
-                                    }
-                                }
-                            });
-                        }
-                        resolve();
+        // 调用API获取翻译
+        const response = await new Promise((resolve, reject) => {
+            chrome.runtime.sendMessage(
+                { type: 'translate', text: text, mode: 'annotate' },
+                response => {
+                    if (chrome.runtime.lastError) {
+                        reject(chrome.runtime.lastError);
+                        return;
                     }
-                );
-            });
+                    resolve(response);
+                }
+            );
+        });
+
+        // 确保响应中包含注释数据
+        if (!response || !response.annotations || !Array.isArray(response.annotations)) {
+            throw new Error('Invalid translation response');
         }
+
+        // 更新缓存并处理注释
+        const annotations = response.annotations.map(annotation => {
+            if (annotation.word && annotation.meaning) {
+                const wordLower = annotation.word.toLowerCase();
+                translationCache.set(wordLower, annotation.meaning);
+                return annotation;
+            }
+            return null;
+        }).filter(Boolean); // 移除无效的注释
 
         // 处理注释
-        processAnnotations(paragraph, text, annotations);
-        
+        if (annotations.length > 0) {
+            processAnnotations(paragraph, text, annotations);
+            console.log(`成功处理 ${annotations.length} 个注释`);
+        } else {
+            console.log('没有找到需要翻译的内容');
+        }
+
     } catch (error) {
-        console.error('注释处理错误', error.message);
+        console.error('注释处理错误:', error);
     } finally {
         // 移除加载指示器
         spinner.remove();
@@ -444,89 +414,124 @@ async function handleParagraphAnnotation(paragraph) {
 function processAnnotations(paragraph, text, annotations) {
     const startProcess = performance.now();
     console.log('开始处理注释', `注释数量: ${annotations.length}`);
-
-    // 创建一个新的文本节点来存储处理后的内容
-    let processedText = text;
-    const replacements = [];
-
-    // 预处理：将所有注释按词长度排序（从长到短）
-    const sortedAnnotations = annotations.sort((a, b) => b.word.length - a.word.length);
-
-    // 第一步：收集所有需要替换的位置
-    sortedAnnotations.forEach(annotation => {
-        if (!annotation.word || !annotation.meaning) return;
-
-        const word = annotation.word;
-        const meaning = annotation.meaning;
-        const wordLower = word.toLowerCase();
-        const regex = new RegExp(`\\b${escapeRegExp(word)}\\b`, 'gi');
-        
-        let match;
-        while ((match = regex.exec(processedText)) !== null) {
-            // 检查这个位置是否已经被标记为需要替换
-            const isOverlap = replacements.some(r => 
-                (match.index >= r.start && match.index < r.end) ||
-                (match.index + match[0].length > r.start && match.index + match[0].length <= r.end)
-            );
-
-            // 检查这个单词是否是全局首次出现
+  
+    // 创建一个临时容器来保存原始的HTML结构
+    const tempContainer = document.createElement('div');
+    tempContainer.innerHTML = paragraph.innerHTML;
+  
+    // 移除加载指示器，消除绿色转圈效果
+    tempContainer.querySelectorAll('.translation-spinner').forEach(spinner => spinner.remove());
+  
+    // 递归处理文本节点
+    function processNode(node) {
+      if (node.nodeType === Node.TEXT_NODE) {
+        let text = node.textContent;
+        const replacements = [];
+  
+        // 对文本节点应用注释
+        annotations.forEach(annotation => {
+          if (!annotation.word || !annotation.meaning) return;
+  
+          const word = annotation.word;
+          const meaning = annotation.meaning;
+          const wordLower = word.toLowerCase();
+          const regex = new RegExp(`\\b${escapeRegExp(word)}\\b`, 'gi');
+  
+          let match;
+          while ((match = regex.exec(text)) !== null) {
+            // 检查是否是全局首次出现
             const isFirstGlobalOccurrence = !globalProcessedWords.has(wordLower);
-
-            if (!isOverlap) {
-                if (isFirstGlobalOccurrence) {
-                    // 如果是全局首次出现，添加翻译和下划线
-                    replacements.push({
-                        start: match.index,
-                        end: match.index + match[0].length,
-                        original: match[0],
-                        meaning: meaning,
-                        showTranslation: true
-                    });
-                    // 将单词添加到全局已处理集合中
-                    globalProcessedWords.add(wordLower);
-                }
-                // 如果不是首次出现，不做任何处理
+  
+            if (isFirstGlobalOccurrence) {
+              replacements.push({
+                start: match.index,
+                end: match.index + match[0].length,
+                original: match[0],
+                meaning: meaning
+              });
+              globalProcessedWords.add(wordLower);
             }
+          }
+        });
+  
+        // 如果有需要替换的内容
+        if (replacements.length > 0) {
+          // 按位置从后往前排序
+          replacements.sort((a, b) => b.start - a.start);
+  
+          // 创建文档片段来存储处理后的内容
+          const fragment = document.createDocumentFragment();
+          let lastIndex = text.length;
+  
+          // 从后往前处理每个替换
+          replacements.forEach(replacement => {
+            // 添加替换位置后面的文本
+            if (lastIndex > replacement.end) {
+              fragment.insertBefore(
+                document.createTextNode(text.slice(replacement.end, lastIndex)),
+                fragment.firstChild
+              );
+            }
+  
+            // 创建带注释的单词元素
+            const wrapper = document.createElement('span');
+            wrapper.className = 'translation-wrapper';
+            Object.assign(wrapper.style, STYLES.wrapper);
+  
+            const translationDiv = document.createElement('div');
+            translationDiv.className = 'translation-text';
+            Object.assign(translationDiv.style, STYLES.translation);
+            translationDiv.textContent = replacement.meaning;
+  
+            const originalSpan = document.createElement('span');
+            Object.assign(originalSpan.style, STYLES.original);
+            originalSpan.textContent = replacement.original;
+  
+            wrapper.appendChild(translationDiv);
+            wrapper.appendChild(originalSpan);
+  
+            fragment.insertBefore(wrapper, fragment.firstChild);
+            lastIndex = replacement.start;
+          });
+  
+          // 添加第一个替换位置之前的文本
+          if (lastIndex > 0) {
+            fragment.insertBefore(
+              document.createTextNode(text.slice(0, lastIndex)),
+              fragment.firstChild
+            );
+          }
+  
+          // 替换原始文本节点
+          node.parentNode.replaceChild(fragment, node);
         }
-    });
-
-    // 第二步：按位置排序（从后往前）
-    replacements.sort((a, b) => b.start - a.start);
-
-    // 第三步：创建最终的HTML
-    let finalHtml = processedText;
-    replacements.forEach(replacement => {
-        const before = finalHtml.slice(0, replacement.start);
-        const after = finalHtml.slice(replacement.end);
-        const annotatedWord = replacement.showTranslation ? 
-            `<span class="translation-wrapper" style="${objectToStyle(STYLES.wrapper)}">
-                <div class="translation-text" style="${objectToStyle(STYLES.translation)}">${escapeHtml(replacement.meaning)}</div>
-                <span style="${objectToStyle(STYLES.original)}">${escapeHtml(replacement.original)}</span>
-            </span>` :
-            replacement.original;
-        
-        finalHtml = before + annotatedWord + after;
-    });
-
+      } else if (node.nodeType === Node.ELEMENT_NODE) {
+        // 递归处理子节点
+        Array.from(node.childNodes).forEach(processNode);
+      }
+    }
+  
+    // 处理所有节点
+    Array.from(tempContainer.childNodes).forEach(processNode);
+  
     // 更新DOM
     const endProcess = performance.now();
-    paragraph.innerHTML = finalHtml;
+    paragraph.innerHTML = tempContainer.innerHTML;
     const endUpdate = performance.now();
-
+  
     // 记录性能数据
     console.log('注释处理完成', {
-        '处理耗时': `${(endProcess - startProcess).toFixed(2)}ms`,
-        'DOM更新耗时': `${(endUpdate - endProcess).toFixed(2)}ms`,
-        '总耗时': `${(endUpdate - startProcess).toFixed(2)}ms`,
-        '全局已处理单词数': globalProcessedWords.size,
-        '缓存单词数': translationCache.size,
-        '本次处理单词数': replacements.length
+      '处理耗时': `${(endProcess - startProcess).toFixed(2)}ms`,
+      'DOM更新耗时': `${(endUpdate - endProcess).toFixed(2)}ms`,
+      '总耗时': `${(endUpdate - startProcess).toFixed(2)}ms`,
+      '全局已处理单词数': globalProcessedWords.size,
+      '缓存单词数': translationCache.size
     });
-
+  
     // 将段落添加到已翻译集合中
     translatedParagraphs.add(paragraph);
     paragraph.style.lineHeight = '1.7';
-}
+  }
 
 // 辅助函数：转义正则表达式特殊字符
 function escapeRegExp(string) {

@@ -27,14 +27,14 @@ async function sendLog(level, message, data = null) {
     const timestamp = new Date().toISOString();
     const logPrefix = `[${timestamp}][${level}]`;
     const color = LOG_COLORS[level];
-    
+
     // 控制台输出带颜色的日志
     console.log(
         `%c${logPrefix} ${message}`,
         `color: ${color}; font-weight: bold;`,
         data
     );
-    
+
     try {
         const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
         if (tab) {
@@ -72,7 +72,7 @@ chrome.runtime.onInstalled.addListener(() => {
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     const startTime = performance.now();
     logger.debug('收到翻译请求', request);
-    
+
     if (request.type === 'translate') {
         logger.trace('开始处理翻译', request.text.substring(0, 50) + '...');
         handleTranslation(request.text, request.mode || 'simple')
@@ -104,9 +104,9 @@ async function handleTranslation(text, mode) {
         contentParsed: 0,
         end: 0
     };
-    
+
     logger.debug('开始加载配置');
-    
+
     const config = await new Promise(resolve => {
         chrome.storage.sync.get(['translatorConfig'], (result) => {
             timings.configLoaded = performance.now();
@@ -126,26 +126,13 @@ async function handleTranslation(text, mode) {
             messages = [
                 {
                     role: "system",
-                    content: "你是一个英语教学助手，帮助中国程序员理解英文文本。你的任务是分析文本中的难词和短语，提供简短的中文释义。注意：1. 只关注真正的难词 2. 释义要简短 3. 必须返回正确的JSON格式 4. 不要解析HTML标签 5. 不要包含任何额外的解释"
+                    content: `你是一个英语教学助手，帮助中国程序员理解英文文本。你的任务是分析文本中的难词和短语，提供简短的中文释义。注意：1.必须返回严格符合此结构的纯净JSON：{"annotations":[{"word":"术语1","meaning":"释义1"},{"word":"术语2","meaning":"释义2"}]} 2. 只关注真正的难词 3. 释义要简短 4. 不要解析HTML标签 5. 不要包含任何额外的解释`
                 },
                 {
                     role: "user",
-                    content: `请帮我找出下面英文文本中对中国程序员来说最不容易理解的0-5个单词或短语（本科英语水平），并给出简短的中文释义（不超过6个字）。请严格按照以下JSON格式返回：
-{
-    "annotations": [
-        {
-            "word": "难词1",
-            "meaning": "中文含义1"
-        },
-        {
-            "word": "难词2",
-            "meaning": "中文含义2"
-        }
-    ]
-}
-
-文本内容：
-${text}`
+                    content: `请帮我找出下面英文文本中对中国程序员来说最不容易理解的0-5个单词或短语（本科英语水平），并给出简短的中文释义（不超过6个字）。请严格按照JSON格式返回
+                            文本内容：
+                            ${text}`
                 }
             ];
         } else {
@@ -177,7 +164,7 @@ ${text}`
         logger.trace('准备发送API请求');
         timings.requestSent = performance.now();
         logger.trace('请求准备完成', `耗时: ${(timings.requestSent - timings.configLoaded).toFixed(2)}ms`);
-        
+
         const response = await fetch(config.apiEndpoint || DEFAULT_CONFIG.apiEndpoint, {
             method: 'POST',
             headers: {
@@ -204,13 +191,13 @@ ${text}`
         let bytesReceived = 0;
         let lastProgressUpdate = streamStart;
         let streamResult = '';
-        
+
         while (true) {
-            const {done, value} = await reader.read();
+            const { done, value } = await reader.read();
             if (done) break;
-            
+
             bytesReceived += value?.length || 0;
-            const chunk = decoder.decode(value, {stream: true});
+            const chunk = decoder.decode(value, { stream: true });
             responseText += chunk;
 
             // 如果是流式模式，尝试处理部分响应
@@ -222,7 +209,7 @@ ${text}`
                         if (line.startsWith('data: ')) {
                             const jsonData = line.slice(6);
                             if (jsonData === '[DONE]') continue;
-                            
+
                             try {
                                 const data = JSON.parse(jsonData);
                                 const content = data.choices?.[0]?.delta?.content;
@@ -296,7 +283,7 @@ ${text}`
                 // 解析返回的JSON
                 let parsedData;
                 const startContentParse = performance.now();
-                
+
                 // 记录原始响应
                 logger.debug('API原始响应', {
                     data: data,
@@ -304,7 +291,7 @@ ${text}`
                     hasChoices: !!data.choices,
                     choicesLength: data.choices?.length
                 });
-                
+
                 // 尝试直接获取content
                 const content = data.choices?.[0]?.message?.content;
                 if (!content) {
